@@ -1,0 +1,227 @@
+name: RDP GAMING - ALL GAMES READY
+
+on:
+  workflow_dispatch:
+
+jobs:
+  gaming-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 4320  # 72 jam (3 hari)
+    
+    steps:
+      - name: Enable Top Performance Mode
+        run: |
+          # Set power plan ke High Performance
+          powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+          
+          # Disable Windows Update (biar gak restart sendiri)
+          sc config wuauserv start= disabled
+          sc stop wuauserv
+          
+          # Optimasi GPU untuk gaming
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" -Name "SystemResponsiveness" -Value 0
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" -Name "NetworkThrottlingIndex" -Value 4294967295
+
+      - name: Configure Core RDP Settings
+        run: |
+          # Enable Remote Desktop
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+
+          # Firewall rule
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" > $null 2>&1
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+
+          Restart-Service -Name TermService -Force
+
+      - name: Create RDP User
+        run: |
+          $password = "Admin123!"
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          
+          # Hapus user kalo udah ada
+          try { Remove-LocalUser -Name "RDP" -ErrorAction SilentlyContinue } catch {}
+          
+          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          
+          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
+
+      - name: Install Tailscale
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+
+      - name: Connect Tailscale
+        run: |
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          
+          Start-Sleep -Seconds 10
+          $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
+      - name: Install Gaming Essentials
+        run: |
+          # Install Chocolatey (package manager)
+          Set-ExecutionPolicy Bypass -Scope Process -Force
+          [System.Net.ServicePointManager]::SecurityProtocol = 3072
+          iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+          
+          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+          
+          # Install core gaming requirements
+          Write-Host "Installing Visual C++ Redistributables..." -ForegroundColor Cyan
+          choco install vcredist-all -y --ignore-checksums
+          
+          Write-Host "Installing DirectX..." -ForegroundColor Cyan
+          choco install directx -y --ignore-checksums
+          
+          Write-Host "Installing .NET Framework..." -ForegroundColor Cyan
+          choco install dotnetfx -y --ignore-checksums
+
+      - name: Install Browsers & Game Launchers
+        run: |
+          # Chrome via winget (auto accept)
+          Write-Host "Installing Chrome..." -ForegroundColor Cyan
+          $env:WINGET_ACCEPT_PACKAGE_AGREEMENTS = "true"
+          winget install Google.Chrome --silent --accept-package-agreements --accept-source-agreements
+          
+          # Firefox
+          Write-Host "Installing Firefox..." -ForegroundColor Cyan
+          winget install Mozilla.Firefox --silent --accept-package-agreements
+          
+          # Steam
+          Write-Host "Installing Steam..." -ForegroundColor Cyan
+          winget install Valve.Steam --silent --accept-package-agreements
+          
+          # Discord
+          Write-Host "Installing Discord..." -ForegroundColor Cyan
+          winget install Discord.Discord --silent --accept-package-agreements
+
+      - name: Install Roblox
+        run: |
+          Write-Host "Downloading Roblox..." -ForegroundColor Cyan
+          
+          # Pake user agent biar ga ditolak
+          $client = New-Object System.Net.WebClient
+          $client.Headers.Add("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+          
+          try {
+              $client.DownloadFile("https://setup.rbxcdn.com/RobloxStudio.exe", "C:\RobloxStudio.exe")
+              
+              if (Test-Path "C:\RobloxStudio.exe") {
+                  Write-Host "Installing Roblox..." -ForegroundColor Cyan
+                  Start-Process -Wait -FilePath "C:\RobloxStudio.exe" -ArgumentList "/S"
+                  Write-Host "Roblox installed!" -ForegroundColor Green
+              }
+          } catch {
+              Write-Host "Roblox download failed, you can install manually later" -ForegroundColor Yellow
+          }
+
+      - name: Optimize Storage (Biar GB Banyak)
+        run: |
+          # Bersihin file temporary biar storage lega
+          Write-Host "Cleaning temporary files..." -ForegroundColor Cyan
+          
+          # Clean Windows temp
+          Remove-Item "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
+          
+          # Clean Chocolatey cache
+          Remove-Item "C:\ProgramData\chocolatey\lib-bkp" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item "C:\ProgramData\chocolatey\logs\*.log" -Force -ErrorAction SilentlyContinue
+          
+          # Disable hibernation (free up space)
+          powercfg -h off
+          
+          # Clean WinSxS (Windows component store)
+          Dism.exe /online /Cleanup-Image /StartComponentCleanup /ResetBase
+          
+          # Show free space
+          $disk = Get-PSDrive C
+          $freeGB = [math]::Round($disk.Free/1GB, 2)
+          $totalGB = [math]::Round(($disk.Used + $disk.Free)/1GB, 2)
+          
+          Write-Host "`n💾 STORAGE INFO:" -ForegroundColor Green
+          Write-Host "   Total : $totalGB GB" -ForegroundColor White
+          Write-Host "   Free  : $freeGB GB" -ForegroundColor White
+
+      - name: Display Connection Info
+        run: |
+          Clear-Host
+          $tsIP = $env:TAILSCALE_IP
+          $freeGB = [math]::Round((Get-PSDrive C).Free/1GB, 2)
+          
+          Write-Host "`n" ("="*60) "`n" -ForegroundColor Cyan
+          Write-Host "           🎮 RDP GAMING - ALL GAMES READY 🎮" -ForegroundColor Yellow
+          Write-Host "`n" ("="*60) "`n" -ForegroundColor Cyan
+          
+          Write-Host "📡 CONNECTION DETAILS:" -ForegroundColor Green
+          Write-Host "   • Tailscale IP : $tsIP" -ForegroundColor White
+          Write-Host "   • Port         : 3389 (RDP)" -ForegroundColor White
+          Write-Host "`n"
+          
+          Write-Host "🔐 LOGIN CREDENTIALS:" -ForegroundColor Green
+          Write-Host "   • Username     : RDP" -ForegroundColor White
+          Write-Host "   • Password     : Admin123!" -ForegroundColor White
+          Write-Host "`n"
+          
+          Write-Host "💻 SYSTEM SPECS:" -ForegroundColor Green
+          $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+          $ram = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1GB, 2)
+          Write-Host "   • CPU          : $($cpu.Name)" -ForegroundColor White
+          Write-Host "   • RAM          : $ram GB" -ForegroundColor White
+          Write-Host "   • Free Storage : $freeGB GB" -ForegroundColor White
+          Write-Host "   • OS           : Windows Server 2022" -ForegroundColor White
+          Write-Host "`n"
+          
+          Write-Host "🎮 GAMES & APPS INSTALLED:" -ForegroundColor Green
+          Write-Host "   • Roblox Studio" -ForegroundColor White
+          Write-Host "   • Steam" -ForegroundColor White
+          Write-Host "   • Discord" -ForegroundColor White
+          Write-Host "   • Google Chrome" -ForegroundColor White
+          Write-Host "   • Mozilla Firefox" -ForegroundColor White
+          Write-Host "   • Visual C++ Redist (all versions)" -ForegroundColor White
+          Write-Host "   • DirectX 12" -ForegroundColor White
+          Write-Host "   • .NET Framework 4.8" -ForegroundColor White
+          Write-Host "`n"
+          
+          Write-Host "📌 HOW TO CONNECT:" -ForegroundColor Yellow
+          Write-Host "1. Install Tailscale di PC/HP lo dari tailscale.com" -ForegroundColor White
+          Write-Host "2. Login pake akun yang SAMA" -ForegroundColor White
+          Write-Host "3. Buka Remote Desktop Connection (mstsc)" -ForegroundColor White
+          Write-Host "4. Masukin IP: $tsIP" -ForegroundColor White
+          Write-Host "5. Login: RDP / Admin123!" -ForegroundColor White
+          Write-Host "`n"
+          
+          Write-Host "⚠️ IMPORTANT:" -ForegroundColor Red
+          Write-Host "• JANGAN TUTUP tab browser ini selama pake RDP!" -ForegroundColor Red
+          Write-Host "• Kalo ditutup, RDP mati dalam 5-10 menit" -ForegroundColor Red
+          Write-Host "• Workflow ini jalan 72 jam, setelah itu harus run manual lagi" -ForegroundColor Red
+          Write-Host "`n" ("="*60) "`n" -ForegroundColor Cyan
+
+      - name: Keep Alive
+        run: |
+          # Keep runner active
+          $counter = 0
+          while ($true) {
+              $counter++
+              $uptime = (Get-Date) - (Get-Process -Id $pid).StartTime
+              $freeGB = [math]::Round((Get-PSDrive C).Free/1GB, 2)
+              
+              Write-Host "[$(Get-Date)] 🟢 RDP Active - Uptime: $($uptime.ToString('dd\:hh\:mm\:ss')) - Free: $freeGB GB" -ForegroundColor Green
+              
+              # Every 10 loops, do cleanup
+              if ($counter % 10 -eq 0) {
+                  # Clean temp files biar storage tetap lega
+                  Remove-Item "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
+                  Remove-Item "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
+              }
+              
+              Start-Sleep -Seconds 300  # Check every 5 minutes
+          }
